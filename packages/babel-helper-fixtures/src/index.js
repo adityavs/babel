@@ -1,9 +1,14 @@
-import pathExists from "path-exists";
-import trimRight from "trim-right";
+import assert from "assert";
+import cloneDeep from "lodash/cloneDeep";
+import trimEnd from "lodash/trimEnd";
 import resolve from "try-resolve";
+import clone from "lodash/clone";
+import extend from "lodash/extend";
+import semver from "semver";
 import path from "path";
 import fs from "fs";
-import _ from "lodash";
+
+const nodeVersion = semver.clean(process.version.slice(1));
 
 function humanize(val, noext) {
   if (noext) val = path.basename(val, path.extname(val));
@@ -11,25 +16,25 @@ function humanize(val, noext) {
 }
 
 type TestFile = {
-  loc: string;
-  code: string;
-  filename: string;
+  loc: string,
+  code: string,
+  filename: string,
 };
 
 type Test = {
-  title: string;
-  disabled: boolean;
-  options: Object;
-  exec: TestFile;
-  actual: TestFile;
-  expected: TestFile;
+  title: string,
+  disabled: boolean,
+  options: Object,
+  exec: TestFile,
+  actual: TestFile,
+  expected: TestFile,
 };
 
 type Suite = {
-  options: Object;
-  tests: Array<Test>;
-  title: string;
-  filename: string;
+  options: Object,
+  tests: Array<Test>,
+  title: string,
+  filename: string,
 };
 
 function assertDirectory(loc) {
@@ -43,54 +48,83 @@ function shouldIgnore(name, blacklist?: Array<string>) {
     return true;
   }
 
-  let ext = path.extname(name);
-  let base = path.basename(name, ext);
+  const ext = path.extname(name);
+  const base = path.basename(name, ext);
 
-  return name[0] === "." || ext === ".md" || base === "LICENSE" || base === "options";
+  return (
+    name[0] === "." || ext === ".md" || base === "LICENSE" || base === "options"
+  );
 }
 
 export default function get(entryLoc): Array<Suite> {
-  let suites = [];
+  const suites = [];
 
   let rootOpts = {};
-  let rootOptsLoc = resolve(entryLoc + "/options");
+  const rootOptsLoc = resolve(entryLoc + "/options");
   if (rootOptsLoc) rootOpts = require(rootOptsLoc);
 
-  for (let suiteName of fs.readdirSync(entryLoc)) {
+  for (const suiteName of fs.readdirSync(entryLoc)) {
     if (shouldIgnore(suiteName)) continue;
 
-    let suite = {
-      options: _.clone(rootOpts),
+    const suite = {
+      options: clone(rootOpts),
       tests: [],
       title: humanize(suiteName),
-      filename: entryLoc + "/" + suiteName
+      filename: entryLoc + "/" + suiteName,
     };
 
     assertDirectory(suite.filename);
     suites.push(suite);
 
-    let suiteOptsLoc = resolve(suite.filename + "/options");
+    const suiteOptsLoc = resolve(suite.filename + "/options");
     if (suiteOptsLoc) suite.options = require(suiteOptsLoc);
 
-    for (let taskName of fs.readdirSync(suite.filename)) {
-      if (shouldIgnore(taskName)) continue;
+    for (const taskName of fs.readdirSync(suite.filename)) {
       push(taskName, suite.filename + "/" + taskName);
     }
 
     function push(taskName, taskDir) {
-      let actualLocAlias = suiteName + "/" + taskName + "/actual.js";
-      let expectLocAlias = suiteName + "/" + taskName + "/expected.js";
-      let execLocAlias   = suiteName + "/" + taskName + "/exec.js";
+      let actualLocAlias = suiteName + "/" + taskName + "/input.js";
+      let expectLocAlias = suiteName + "/" + taskName + "/output.js";
+      let execLocAlias = suiteName + "/" + taskName + "/exec.js";
 
-      let actualLoc = taskDir + "/actual.js";
-      let expectLoc = taskDir + "/expected.js";
-      let execLoc   = taskDir + "/exec.js";
+      let actualLoc = taskDir + "/input.js";
+      let expectLoc = taskDir + "/output.js";
+      let execLoc = taskDir + "/exec.js";
+
+      const hasExecJS = fs.existsSync(execLoc);
+      const hasExecMJS = fs.existsSync(asMJS(execLoc));
+      if (hasExecMJS) {
+        assert(!hasExecJS, `${asMJS(execLoc)}: Found conflicting .js`);
+
+        execLoc = asMJS(execLoc);
+        execLocAlias = asMJS(execLocAlias);
+      }
+
+      const hasExpectJS = fs.existsSync(expectLoc);
+      const hasExpectMJS = fs.existsSync(asMJS(expectLoc));
+      if (hasExpectMJS) {
+        assert(!hasExpectJS, `${asMJS(expectLoc)}: Found conflicting .js`);
+
+        expectLoc = asMJS(expectLoc);
+        expectLocAlias = asMJS(expectLocAlias);
+      }
+
+      const hasActualJS = fs.existsSync(actualLoc);
+      const hasActualMJS = fs.existsSync(asMJS(actualLoc));
+      if (hasActualMJS) {
+        assert(!hasActualJS, `${asMJS(actualLoc)}: Found conflicting .js`);
+
+        actualLoc = asMJS(actualLoc);
+        actualLocAlias = asMJS(actualLocAlias);
+      }
 
       if (fs.statSync(taskDir).isFile()) {
-        let ext = path.extname(taskDir);
-        if (ext !== ".js" && ext !== ".module.js") return;
+        const ext = path.extname(taskDir);
+        if (ext !== ".js" && ext !== ".mjs") return;
 
         execLoc = taskDir;
+        execLocAlias = suiteName + "/" + taskName;
       }
 
       if (resolve.relative(expectLoc + "on")) {
@@ -98,12 +132,13 @@ export default function get(entryLoc): Array<Suite> {
         expectLocAlias += "on";
       }
 
-      let taskOpts = _.cloneDeep(suite.options);
+      const taskOpts = cloneDeep(suite.options);
 
-      let taskOptsLoc = resolve(taskDir + "/options");
-      if (taskOptsLoc) _.merge(taskOpts, require(taskOptsLoc));
+      const taskOptsLoc = resolve(taskDir + "/options");
+      if (taskOptsLoc) extend(taskOpts, require(taskOptsLoc));
 
-      let test = {
+      const test = {
+        optionsDir: taskOptsLoc ? path.dirname(taskOptsLoc) : null,
         title: humanize(taskName, true),
         disabled: taskName[0] === ".",
         options: taskOpts,
@@ -120,9 +155,29 @@ export default function get(entryLoc): Array<Suite> {
         expect: {
           loc: expectLoc,
           code: readFile(expectLoc),
-          filename: expectLocAlias
-        }
+          filename: expectLocAlias,
+        },
       };
+
+      // If there's node requirement, check it before pushing task
+      if (taskOpts.minNodeVersion) {
+        const minimumVersion = semver.clean(taskOpts.minNodeVersion);
+
+        if (minimumVersion == null) {
+          throw new Error(
+            `'minNodeVersion' has invalid semver format: ${
+              taskOpts.minNodeVersion
+            }`,
+          );
+        }
+
+        if (semver.lt(nodeVersion, minimumVersion)) {
+          return;
+        }
+
+        // Delete to avoid option validation error
+        delete taskOpts.minNodeVersion;
+      }
 
       // traceur checks
 
@@ -132,14 +187,19 @@ export default function get(entryLoc): Array<Suite> {
 
       suite.tests.push(test);
 
-      let sourceMappingsLoc = taskDir + "/source-mappings.json";
-      if (pathExists.sync(sourceMappingsLoc)) {
+      const sourceMappingsLoc = taskDir + "/source-mappings.json";
+      if (fs.existsSync(sourceMappingsLoc)) {
         test.sourceMappings = JSON.parse(readFile(sourceMappingsLoc));
       }
 
-      let sourceMapLoc = taskDir + "/source-map.json";
-      if (pathExists.sync(sourceMapLoc)) {
+      const sourceMapLoc = taskDir + "/source-map.json";
+      if (fs.existsSync(sourceMapLoc)) {
         test.sourceMap = JSON.parse(readFile(sourceMapLoc));
+      }
+
+      const inputMapLoc = taskDir + "/input-source-map.json";
+      if (fs.existsSync(inputMapLoc)) {
+        test.inputSourceMap = JSON.parse(readFile(inputMapLoc));
       }
     }
   }
@@ -148,12 +208,12 @@ export default function get(entryLoc): Array<Suite> {
 }
 
 export function multiple(entryLoc, ignore?: Array<string>) {
-  let categories = {};
+  const categories = {};
 
-  for (let name of fs.readdirSync(entryLoc)) {
+  for (const name of fs.readdirSync(entryLoc)) {
     if (shouldIgnore(name, ignore)) continue;
 
-    let loc = path.join(entryLoc, name);
+    const loc = path.join(entryLoc, name);
     assertDirectory(loc);
 
     categories[name] = get(loc);
@@ -162,9 +222,13 @@ export function multiple(entryLoc, ignore?: Array<string>) {
   return categories;
 }
 
+function asMJS(filepath) {
+  return filepath.replace(/\.js$/, ".mjs");
+}
+
 export function readFile(filename) {
-  if (pathExists.sync(filename)) {
-    let file = trimRight(fs.readFileSync(filename, "utf8"));
+  if (fs.existsSync(filename)) {
+    let file = trimEnd(fs.readFileSync(filename, "utf8"));
     file = file.replace(/\r\n/g, "\n");
     return file;
   } else {

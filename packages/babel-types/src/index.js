@@ -1,438 +1,124 @@
-import toFastProperties from "to-fast-properties";
-import compact from "lodash/array/compact";
-import loClone from "lodash/lang/clone";
-import each from "lodash/collection/each";
-import uniq from "lodash/array/uniq";
+// @flow
+import isReactComponent from "./validators/react/isReactComponent";
+import isCompatTag from "./validators/react/isCompatTag";
+import buildChildren from "./builders/react/buildChildren";
 
-let t = exports;
+// asserts
+export { default as assertNode } from "./asserts/assertNode";
+export * from "./asserts/generated";
 
-/**
- * Registers `is[Type]` and `assert[Type]` generated functions for a given `type`.
- * Pass `skipAliasCheck` to force it to directly compare `node.type` with `type`.
- */
+//builders
+export {
+  default as createTypeAnnotationBasedOnTypeof,
+} from "./builders/flow/createTypeAnnotationBasedOnTypeof";
+export {
+  default as createUnionTypeAnnotation,
+} from "./builders/flow/createUnionTypeAnnotation";
+export * from "./builders/generated";
 
-function registerType(type: string) {
-  let is = t[`is${type}`] = function (node, opts) {
-    return t.is(type, node, opts);
-  };
+// clone
+export { default as cloneNode } from "./clone/cloneNode";
+export { default as clone } from "./clone/clone";
+export { default as cloneDeep } from "./clone/cloneDeep";
+export { default as cloneWithoutLoc } from "./clone/cloneWithoutLoc";
 
-  t[`assert${type}`] = function (node, opts) {
-    opts = opts || {};
-    if (!is(node, opts)) {
-      throw new Error(`Expected type ${JSON.stringify(type)} with option ${JSON.stringify(opts)}`);
-    }
-  };
-}
+// comments
+export { default as addComment } from "./comments/addComment";
+export { default as addComments } from "./comments/addComments";
+export {
+  default as inheritInnerComments,
+} from "./comments/inheritInnerComments";
+export {
+  default as inheritLeadingComments,
+} from "./comments/inheritLeadingComments";
+export { default as inheritsComments } from "./comments/inheritsComments";
+export {
+  default as inheritTrailingComments,
+} from "./comments/inheritTrailingComments";
+export { default as removeComments } from "./comments/removeComments";
 
-//
-
+// constants
+export * from "./constants/generated";
 export * from "./constants";
 
-import "./definitions/init";
-import { VISITOR_KEYS, ALIAS_KEYS, NODE_FIELDS, BUILDER_KEYS, DEPRECATED_KEYS } from "./definitions";
-export { VISITOR_KEYS, ALIAS_KEYS, NODE_FIELDS, BUILDER_KEYS, DEPRECATED_KEYS };
-
-import * as _react from "./react";
-export { _react as react };
-
-/**
- * Registers `is[Type]` and `assert[Type]` for all types.
- */
-
-for (let type in t.VISITOR_KEYS) {
-  registerType(type);
-}
-
-/**
- * Flip `ALIAS_KEYS` for faster access in the reverse direction.
- */
-
-t.FLIPPED_ALIAS_KEYS = {};
-
-each(t.ALIAS_KEYS, function (aliases, type) {
-  each(aliases, function (alias) {
-    let types = t.FLIPPED_ALIAS_KEYS[alias] = t.FLIPPED_ALIAS_KEYS[alias] || [];
-    types.push(type);
-  });
-});
-
-/**
- * Registers `is[Alias]` and `assert[Alias]` functions for all aliases.
- */
-
-each(t.FLIPPED_ALIAS_KEYS, function (types, type) {
-  t[type.toUpperCase() + "_TYPES"] = types;
-  registerType(type);
-});
-
-export const TYPES = Object.keys(t.VISITOR_KEYS)
-  .concat(Object.keys(t.FLIPPED_ALIAS_KEYS))
-  .concat(Object.keys(t.DEPRECATED_KEYS));
-
-/**
- * Returns whether `node` is of given `type`.
- *
- * For better performance, use this instead of `is[Type]` when `type` is unknown.
- * Optionally, pass `skipAliasCheck` to directly compare `node.type` with `type`.
- */
-
-export function is(type: string, node: Object, opts?: Object): boolean {
-  if (!node) return false;
-
-  let matches = isType(node.type, type);
-  if (!matches) return false;
-
-  if (typeof opts === "undefined") {
-    return true;
-  } else {
-    return t.shallowEqual(node, opts);
-  }
-}
-
-/**
- * Test if a `nodeType` is a `targetType` or if `targetType` is an alias of `nodeType`.
- */
-
-export function isType(nodeType: string, targetType: string): boolean {
-  if (nodeType === targetType) return true;
-
-  let aliases: ?Array<string> = t.FLIPPED_ALIAS_KEYS[targetType];
-  if (aliases) {
-    if (aliases[0] === nodeType) return true;
-
-    for (let alias of aliases) {
-      if (nodeType === alias) return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Description
- */
-
-each(t.BUILDER_KEYS, function (keys, type) {
-  function builder() {
-    if (arguments.length > keys.length) {
-      throw new Error(
-        `t.${type}: Too many arguments passed. Received ${arguments.length} but can receive ` +
-        `no more than ${keys.length}`
-      );
-    }
-
-    let node = {};
-    node.type = type;
-
-    let i = 0;
-
-    for (let key of (keys: Array<string>)) {
-      let field = t.NODE_FIELDS[type][key];
-
-      let arg = arguments[i++];
-      if (arg === undefined) arg = loClone(field.default);
-
-      node[key] = arg;
-    }
-
-    for (let key in node) {
-      validate(node, key, node[key]);
-    }
-
-    return node;
-  }
-
-  t[type] = builder;
-  t[type[0].toLowerCase() + type.slice(1)] = builder;
-});
-
-/**
- * Description
- */
-
-for (let type in t.DEPRECATED_KEYS) {
-  let newType = t.DEPRECATED_KEYS[type];
-
-  function proxy(fn) {
-    return function () {
-      console.trace(`The node type ${type} has been renamed to ${newType}`);
-      return fn.apply(this, arguments);
-    };
-  }
-
-  t[type] = t[type[0].toLowerCase() + type.slice(1)] = proxy(t[newType]);
-  t[`is${type}`] = proxy(t[`is${newType}`]);
-  t[`assert${type}`] = proxy(t[`assert${newType}`]);
-}
-
-/**
- * Description
- */
-
-export function validate(node?: Object, key: string, val: any) {
-  if (!node) return;
-
-  let fields = t.NODE_FIELDS[node.type];
-  if (!fields) return;
-
-  let field = fields[key];
-  if (!field || !field.validate) return;
-  if (field.optional && val == null) return;
-
-  field.validate(node, key, val);
-}
-
-/**
- * Test if an object is shallowly equal.
- */
-
-export function shallowEqual(actual: Object, expected: Object): boolean {
-  let keys = Object.keys(expected);
-
-  for (let key of (keys: Array<string>)) {
-    if (actual[key] !== expected[key]) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/**
- * Append a node to a member expression.
- */
-
-export function appendToMemberExpression(member: Object, append: Object, computed?: boolean): Object {
-  member.object   = t.memberExpression(member.object, member.property, member.computed);
-  member.property = append;
-  member.computed = !!computed;
-  return member;
-}
-
-/**
- * Prepend a node to a member expression.
- */
-
-export function prependToMemberExpression(member: Object, prepend: Object): Object {
-  member.object = t.memberExpression(prepend, member.object);
-  return member;
-}
-
-/**
- * Ensure the `key` (defaults to "body") of a `node` is a block.
- * Casting it to a block if it is not.
- */
-
-export function ensureBlock(node: Object, key: string = "body"): Object {
-  return node[key] = t.toBlock(node[key], node);
-}
-
-/**
- * Create a shallow clone of a `node` excluding `_private` properties.
- */
-
-export function clone(node: Object): Object {
-  let newNode = {};
-  for (let key in node) {
-    if (key[0] === "_") continue;
-    newNode[key] = node[key];
-  }
-  return newNode;
-}
-
-/**
- * Create a shallow clone of a `node` excluding `_private` and location properties.
- */
-
-export function cloneWithoutLoc(node: Object): Object {
-  let newNode = clone(node);
-  delete newNode.loc;
-  return newNode;
-}
-
-/**
- * Create a deep clone of a `node` and all of it's child nodes
- * exluding `_private` properties.
- */
-
-export function cloneDeep(node: Object): Object {
-  let newNode = {};
-
-  for (let key in node) {
-    if (key[0] === "_") continue;
-
-    let val = node[key];
-
-    if (val) {
-      if (val.type) {
-        val = t.cloneDeep(val);
-      } else if (Array.isArray(val)) {
-        val = val.map(t.cloneDeep);
-      }
-    }
-
-    newNode[key] = val;
-  }
-
-  return newNode;
-}
-
-/**
- * Build a function that when called will return whether or not the
- * input `node` `MemberExpression` matches the input `match`.
- *
- * For example, given the match `React.createClass` it would match the
- * parsed nodes of `React.createClass` and `React["createClass"]`.
- */
-
-export function buildMatchMemberExpression(match:string, allowPartial?: boolean): Function {
-  let parts = match.split(".");
-
-  return function (member) {
-    // not a member expression
-    if (!t.isMemberExpression(member)) return false;
-
-    let search = [member];
-    let i = 0;
-
-    while (search.length) {
-      let node = search.shift();
-
-      if (allowPartial && i === parts.length) {
-        return true;
-      }
-
-      if (t.isIdentifier(node)) {
-        // this part doesn't match
-        if (parts[i] !== node.name) return false;
-      } else if (t.isStringLiteral(node)) {
-        // this part doesn't match
-        if (parts[i] !== node.value) return false;
-      } else if (t.isMemberExpression(node)) {
-        if (node.computed && !t.isStringLiteral(node.property)) {
-          // we can't deal with this
-          return false;
-        } else {
-          search.push(node.object);
-          search.push(node.property);
-          continue;
-        }
-      } else {
-        // we can't deal with this
-        return false;
-      }
-
-      // too many parts
-      if (++i > parts.length) {
-        return false;
-      }
-    }
-
-    return true;
-  };
-}
-
-/**
- * Remove comment properties from a node.
- */
-
-export function removeComments(node: Object): Object {
-  for (let key of t.COMMENT_KEYS) {
-    delete node[key];
-  }
-  return node;
-}
-
-/**
- * Inherit all unique comments from `parent` node to `child` node.
- */
-
-export function inheritsComments(child: Object, parent: Object): Object {
-  inheritTrailingComments(child, parent);
-  inheritLeadingComments(child, parent);
-  inheritInnerComments(child, parent);
-  return child;
-}
-
-export function inheritTrailingComments(child: Object, parent: Object) {
-  _inheritComments("trailingComments", child, parent);
-}
-
-export function inheritLeadingComments(child: Object, parent: Object) {
-  _inheritComments("leadingComments", child, parent);
-}
-
-export function inheritInnerComments(child: Object, parent: Object) {
-  _inheritComments("innerComments", child, parent);
-}
-
-function _inheritComments(key, child, parent) {
-  if (child && parent) {
-    child[key] = uniq(compact([].concat(child[key], parent[key])));
-  }
-}
-
-
-// Can't use import because of cyclic dependency between babel-traverse
-// and this module (babel-types). This require needs to appear after
-// we export the TYPES constant.
-const traverse = require("babel-traverse").default;
-
-/**
- * Inherit all contextual properties from `parent` node to `child` node.
- */
-
-export function inherits(child: Object, parent: Object): Object {
-  if (!child || !parent) return child;
-
-  // optionally inherit specific properties if not null
-  for (let key of (t.INHERIT_KEYS.optional: Array<string>)) {
-    if (child[key] == null) {
-      child[key] = parent[key];
-    }
-  }
-
-  // force inherit "private" properties
-  for (let key in parent) {
-    if (key[0] === "_") child[key] = parent[key];
-  }
-
-  // force inherit select properties
-  for (let key of (t.INHERIT_KEYS.force: Array<string>)) {
-    child[key] = parent[key];
-  }
-
-  t.inheritsComments(child, parent);
-  traverse.copyCache(parent, child);
-
-  return child;
-}
-
-/**
- * TODO
- */
-
-export function assertNode(node?) {
-  if (!isNode(node)) {
-    // $FlowFixMe
-    throw new TypeError("Not a valid node " + (node && node.type));
-  }
-}
-
-/**
- * TODO
- */
-
-export function isNode(node?): boolean {
-  return !!(node && VISITOR_KEYS[node.type]);
-}
-
-// Optimize property access.
-toFastProperties(t);
-toFastProperties(t.VISITOR_KEYS);
-
-//
-export * from "./retrievers";
-export * from "./validators";
-export * from "./converters";
-export * from "./flow";
+// converters
+export { default as ensureBlock } from "./converters/ensureBlock";
+export {
+  default as toBindingIdentifierName,
+} from "./converters/toBindingIdentifierName";
+export { default as toBlock } from "./converters/toBlock";
+export { default as toComputedKey } from "./converters/toComputedKey";
+export { default as toExpression } from "./converters/toExpression";
+export { default as toIdentifier } from "./converters/toIdentifier";
+export { default as toKeyAlias } from "./converters/toKeyAlias";
+export {
+  default as toSequenceExpression,
+} from "./converters/toSequenceExpression";
+export { default as toStatement } from "./converters/toStatement";
+export { default as valueToNode } from "./converters/valueToNode";
+
+// definitions
+export * from "./definitions";
+
+// modifications
+export {
+  default as appendToMemberExpression,
+} from "./modifications/appendToMemberExpression";
+export { default as inherits } from "./modifications/inherits";
+export {
+  default as prependToMemberExpression,
+} from "./modifications/prependToMemberExpression";
+export { default as removeProperties } from "./modifications/removeProperties";
+export {
+  default as removePropertiesDeep,
+} from "./modifications/removePropertiesDeep";
+export {
+  default as removeTypeDuplicates,
+} from "./modifications/flow/removeTypeDuplicates";
+
+// retrievers
+export {
+  default as getBindingIdentifiers,
+} from "./retrievers/getBindingIdentifiers";
+export {
+  default as getOuterBindingIdentifiers,
+} from "./retrievers/getOuterBindingIdentifiers";
+
+// traverse
+export { default as traverse } from "./traverse/traverse";
+export type * from "./traverse/traverse";
+export { default as traverseFast } from "./traverse/traverseFast";
+
+// utils
+export { default as shallowEqual } from "./utils/shallowEqual";
+
+// validators
+export { default as is } from "./validators/is";
+export { default as isBinding } from "./validators/isBinding";
+export { default as isBlockScoped } from "./validators/isBlockScoped";
+export { default as isImmutable } from "./validators/isImmutable";
+export { default as isLet } from "./validators/isLet";
+export { default as isNode } from "./validators/isNode";
+export { default as isNodesEquivalent } from "./validators/isNodesEquivalent";
+export { default as isReferenced } from "./validators/isReferenced";
+export { default as isScope } from "./validators/isScope";
+export { default as isSpecifierDefault } from "./validators/isSpecifierDefault";
+export { default as isType } from "./validators/isType";
+export {
+  default as isValidES3Identifier,
+} from "./validators/isValidES3Identifier";
+export { default as isValidIdentifier } from "./validators/isValidIdentifier";
+export { default as isVar } from "./validators/isVar";
+export { default as matchesPattern } from "./validators/matchesPattern";
+export { default as validate } from "./validators/validate";
+export {
+  default as buildMatchMemberExpression,
+} from "./validators/buildMatchMemberExpression";
+export * from "./validators/generated";
+
+// react
+export const react = {
+  isReactComponent,
+  isCompatTag,
+  buildChildren,
+};

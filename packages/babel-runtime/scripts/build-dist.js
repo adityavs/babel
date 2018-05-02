@@ -1,63 +1,43 @@
-var outputFile = require("output-file-sync");
-var each       = require("lodash/collection/each");
-var fs         = require("fs");
-var _          = require("lodash");
+"use strict";
 
-var coreDefinitions = require("babel-plugin-transform-runtime").definitions;
+const outputFile = require("output-file-sync");
+const coreDefinitions = require("@babel/plugin-transform-runtime").definitions;
+const helpers = require("@babel/helpers");
+const babel = require("@babel/core");
+const t = require("@babel/types");
 
-var paths = ["is-iterable", "get-iterator"];
+const paths = ["is-iterable", "get-iterator"];
 
-each(coreDefinitions.builtins, function (path) {
+Object.keys(coreDefinitions.builtins).forEach((key) => {
+  const path = coreDefinitions.builtins[key];
   paths.push(path);
 });
 
-each(coreDefinitions.methods, function (props) {
-  each(props, function (path) {
+Object.keys(coreDefinitions.methods).forEach((key) => {
+  const props = coreDefinitions.methods[key];
+  Object.keys(props).forEach((key2) => {
+    const path = props[key2];
     paths.push(path);
   });
 });
 
-each(paths, function (path) {
-  writeFile("core-js/" + path + ".js", defaultify('require("core-js/library/fn/' + path + '")'));
+paths.forEach(function(path) {
+  writeFile(
+    "core-js/" + path + ".js",
+    defaultify(`require("core-js/library/fn/${path}")`)
+  );
 });
-
-// Should be removed in the next major release:
-var legacy = {
-  "string/pad-left": "string/pad-start",
-  "string/pad-right": "string/pad-end"
-};
-
-each(legacy, function (value, key) {
-  writeFile("core-js/" + key + ".js", defaultify('require("core-js/library/fn/' + value + '")'));
-});
-
-var template   = require("babel-template");
-var helpers    = require("babel-helpers");
-var babel      = require("../../babel-core");
-var util       = require("../../babel-core/lib/util");
-var t          = require("../../babel-types");
 
 function relative(filename) {
-  return __dirname + "/../" + filename;
-}
-
-function readFile(filename, shouldDefaultify) {
-  var file = fs.readFileSync(require.resolve(filename), "utf8");
-
-  if (shouldDefaultify) {
-    file += "\n" + defaultify("module.exports") + "\n";
-  }
-
-  return file;
+  return `${__dirname}/../${filename}`;
 }
 
 function defaultify(name) {
-  return 'module.exports = { "default": ' + name + ', __esModule: true };';
+  return `module.exports = ${name};`;
 }
 
 function writeRootFile(filename, content) {
   filename = relative(filename);
-  //console.log(filename);
   outputFile(filename, content);
 }
 
@@ -65,69 +45,121 @@ function writeFile(filename, content) {
   return writeRootFile(filename, content);
 }
 
-var transformOpts = {
-  presets: [
-    require("../../babel-preset-es2015")
-  ],
+function makeTransformOpts(modules, useBuiltIns) {
+  const opts = {
+    presets: [[require("@babel/preset-env"), { modules: false }]],
 
-  plugins: [
-    require("../../babel-plugin-transform-runtime"),
-    [require("../../babel-plugin-transform-es2015-modules-commonjs"), {loose: true, strict: false}]
-  ]
-};
+    plugins: [
+      [
+        require("@babel/plugin-transform-runtime"),
+        { useBuiltIns, useESModules: modules === false },
+      ],
+    ],
+  };
+  return opts;
+}
 
-function buildRuntimeRewritePlugin(relativePath, helperName) {
+function adjustImportPath(node, relativePath) {
+  if (helpers.list.indexOf(node.value) >= 0) {
+    node.value = `./${node.value}`;
+  } else {
+    node.value = node.value.replace(/^@babel\/runtime/, relativePath);
+  }
+}
+
+function buildRuntimeRewritePlugin(relativePath, helperName, dependencies) {
   return {
-    pre: function (file){
-      var original = file.get("helperGenerator");
-      file.set("helperGenerator", function(name){
+    pre(file) {
+      const original = file.get("helperGenerator");
+      file.set("helperGenerator", (name) => {
         // make sure that helpers won't insert circular references to themselves
-        if (name === helperName) return;
+        if (name === helperName) return false;
 
         return original(name);
       });
     },
     visitor: {
-      CallExpression: function(path){
-        if (!path.get("callee").isIdentifier({name: "require"}) ||
+      ImportDeclaration(path) {
+        adjustImportPath(path.get("source").node, relativePath);
+      },
+      CallExpression(path) {
+        if (
+          !path.get("callee").isIdentifier({ name: "require" }) ||
           path.get("arguments").length !== 1 ||
-          !path.get("arguments")[0].isStringLiteral()) return;
+          !path.get("arguments")[0].isStringLiteral()
+        ) {
+          return;
+        }
 
-        // replace any reference to babel-runtime with a relative path
-        path.get("arguments")[0].node.value = path.get("arguments")[0].node.value
-          .replace(/^babel-runtime/, relativePath);
-      }
-    }
+        // replace any reference to @babel/runtime and other helpers
+        // with a relative path
+        adjustImportPath(path.get("arguments")[0].node, relativePath);
+      },
+    },
   };
 }
 
-function selfContainify(path, code) {
-  return babel.transform(code, {
-    presets: transformOpts.presets,
-    plugins: transformOpts.plugins.concat([buildRuntimeRewritePlugin(path, null)])
-  }).code;
+function buildRequireCall(id, dep) {
+  return t.variableDeclaration("var", [
+    t.variableDeclarator(
+      id,
+      t.callExpression(t.identifier("require"), [t.stringLiteral(dep)])
+    )
+  ]);
 }
 
-function buildHelper(helperName) {
-  var tree = t.program([
-    t.exportDefaultDeclaration(helpers.get(helperName))
-  ]);
+function buildHelper(helperName, modules, useBuiltIns) {
+  const id =
+    modules === "commonjs"
+      ? t.memberExpression(t.identifier("module"), t.identifier("exports"))
+      : null;
+  const sourceType = modules === "commonjs" ? "script" : "module";
 
+  const tree = t.program([], [], sourceType);
+  const dependencies = {};
+  let bindings = null;
+
+  if (modules === "commonjs") {
+    bindings = [];
+    for (const dep of helpers.getDependencies(helperName)) {
+      const id = dependencies[dep] = t.identifier(t.toIdentifier(dep));
+      tree.body.push(buildRequireCall(id, dep));
+      bindings.push(id.name);
+    }
+  }
+
+  const helper = helpers.get(
+    helperName,
+    dep => dependencies[dep],
+    id,
+    bindings
+  );
+  tree.body.push.apply(tree.body, helper.nodes);
+
+  const transformOpts = makeTransformOpts(modules, useBuiltIns);
+
+  const relative = useBuiltIns ? "../.." : "..";
+  
   return babel.transformFromAst(tree, null, {
     presets: transformOpts.presets,
-    plugins: transformOpts.plugins.concat([buildRuntimeRewritePlugin("..", helperName)])
+    plugins: transformOpts.plugins.concat([
+      buildRuntimeRewritePlugin(
+        modules === false ? `../${relative}` : relative,
+        helperName
+      ),
+    ]),
   }).code;
 }
 
-each(helpers.list, function (helperName) {
-  writeFile("helpers/" + helperName + ".js", buildHelper(helperName));
+for (const modules of ["commonjs", false]) {
+  for (const builtin of [false, true]) {
+    const dirname = `helpers/${builtin ? "builtin/" : ""}${!modules ? "es6/" : ""}`;
 
-  // compat
-  var helperAlias = _.kebabCase(helperName);
-  var content = "module.exports = require(\"./" + helperName + ".js\");";
-  writeFile("helpers/_" + helperAlias + ".js", content);
-  if (helperAlias !== helperName) writeFile("helpers/" + helperAlias + ".js", content);
-});
-
-writeFile("regenerator/index.js", readFile("../../babel-regenerator-runtime/runtime-module", true));
-writeFile("regenerator/runtime.js", selfContainify("..", readFile("../../babel-regenerator-runtime/runtime")));
+    for (const helperName of helpers.list) {
+      writeFile(
+        `${dirname}${helperName}.js`,
+        buildHelper(helperName, modules, builtin)
+      );
+    }
+  }
+}

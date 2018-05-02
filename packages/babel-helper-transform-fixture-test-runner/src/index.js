@@ -1,50 +1,358 @@
-/* global test */
-/* global suite */
-
-import * as babel from "babel-core";
-import { buildExternalHelpers } from "babel-core";
-import path from "path";
-import getFixtures from "babel-helper-fixtures";
+/* eslint-env jest */
+import * as babel from "@babel/core";
+import { buildExternalHelpers } from "@babel/core";
+import getFixtures from "@babel/helper-fixtures";
 import sourceMap from "source-map";
-import codeFrame from "babel-code-frame";
+import { codeFrameColumns } from "@babel/code-frame";
+import defaults from "lodash/defaults";
+import includes from "lodash/includes";
 import * as helpers from "./helpers";
+import extend from "lodash/extend";
+import merge from "lodash/merge";
+import resolve from "resolve";
 import assert from "assert";
-import chai from "chai";
-import _ from "lodash";
-import "babel-polyfill";
-import register from "babel-register";
+import fs from "fs";
+import path from "path";
+import vm from "vm";
 
-register({
-  ignore: [
-    path.resolve(__dirname + "/../.."),
-    "node_modules",
-  ]
+import diff from "jest-diff";
+
+const moduleCache = {};
+const testContext = vm.createContext({
+  ...helpers,
+  process: process,
+  transform: babel.transform,
+  setTimeout: setTimeout,
+  setImmediate: setImmediate,
+  expect,
 });
+testContext.global = testContext;
 
-let babelHelpers = eval(buildExternalHelpers(null, "var"));
+// Initialize the test context with the polyfill, and then freeze the global to prevent implicit
+// global creation in tests, which could cause things to bleed between tests.
+runModuleInTestContext("@babel/polyfill", __filename);
 
-function wrapPackagesArray(type, names) {
-  return (names || []).map(function (val) {
+// Populate the "babelHelpers" global with Babel's helper utilities.
+runCodeInTestContext(buildExternalHelpers());
+
+/**
+ * A basic implementation of CommonJS so we can execute `@babel/polyfill` inside our test context.
+ * This allows us to run our unittests
+ */
+function runModuleInTestContext(id: string, relativeFilename: string) {
+  const filename = resolve.sync(id, {
+    basedir: path.dirname(relativeFilename),
+  });
+
+  // Expose Node-internal modules if the tests want them. Note, this will not execute inside
+  // the context's global scope.
+  if (filename === id) return require(id);
+
+  if (moduleCache[filename]) return moduleCache[filename].exports;
+
+  const module = (moduleCache[filename] = {
+    id: filename,
+    exports: {},
+  });
+  const dirname = path.dirname(filename);
+  const req = id => runModuleInTestContext(id, filename);
+
+  const src = fs.readFileSync(filename, "utf8");
+  const code = `(function (exports, require, module, __filename, __dirname) {${src}\n});`;
+
+  vm
+    .runInContext(code, testContext, {
+      filename,
+      displayErrors: true,
+    })
+    .call(module.exports, module.exports, req, module, filename, dirname);
+
+  return module.exports;
+}
+
+/**
+ * Run the given snippet of code inside a CommonJS module.
+ *
+ * Exposed for unit tests, not for use as an API.
+ */
+export function runCodeInTestContext(
+  code: string,
+  opts: { filename?: string } = {},
+) {
+  const filename = opts.filename || null;
+  const dirname = filename ? path.dirname(filename) : null;
+  const req = filename ? id => runModuleInTestContext(id, filename) : null;
+
+  const module = {
+    id: filename,
+    exports: {},
+  };
+
+  const oldCwd = process.cwd();
+  try {
+    if (opts.filename) process.chdir(path.dirname(opts.filename));
+
+    // Expose the test options as "opts", but otherwise run the test in a CommonJS-like environment.
+    // Note: This isn't doing .call(module.exports, ...) because some of our tests currently
+    // rely on 'this === global'.
+    const src = `(function(exports, require, module, __filename, __dirname, opts) {${code}\n});`;
+    return vm.runInContext(src, testContext, {
+      filename,
+      displayErrors: true,
+    })(module.exports, req, module, filename, dirname, opts);
+  } finally {
+    process.chdir(oldCwd);
+  }
+}
+
+function wrapPackagesArray(type, names, optionsDir) {
+  return (names || []).map(function(val) {
     if (typeof val === "string") val = [val];
-    val[0] = __dirname + "/../../babel-" + type + "-" + val[0];
+
+    // relative path (outside of monorepo)
+    if (val[0][0] === ".") {
+      if (!optionsDir) {
+        throw new Error(
+          "Please provide an options.json in test dir when using a " +
+            "relative plugin path.",
+        );
+      }
+
+      val[0] = path.resolve(optionsDir, val[0]);
+    } else {
+      // check node_modules/babel-x-y
+      val[0] = __dirname + "/../../babel-" + type + "-" + val[0];
+    }
+
     return val;
   });
 }
 
+function checkDuplicatedNodes(ast) {
+  // TODO Remove all these function when regenerator doesn't
+  // insert duplicated nodes
+
+  const nodes = new WeakSet();
+  const parents = new WeakMap();
+
+  const setParent = (child, parent) => {
+    if (typeof child === "object" && child !== null) {
+      let p = parents.get(child);
+      if (!p) {
+        p = [];
+        parents.set(child, p);
+      }
+      p.unshift(parent);
+    }
+  };
+  const registerChildren = node => {
+    for (const key in node) {
+      if (Array.isArray(node[key])) {
+        node[key].forEach(child => setParent(child, node));
+      } else {
+        setParent(node[key], node);
+      }
+    }
+  };
+
+  const parentIs = (node, test) => {
+    return (parents.get(node) || []).some(parent => test(parent));
+  };
+  const isByRegenerator = node => {
+    if (!node) {
+      return false;
+    } else if (node.type === "Identifier") {
+      if (/^_(?:context|value|callee|marked)\d*$/.test(node.name)) {
+        return true;
+      } else if (
+        /^t\d+$/.test(node.name) &&
+        parentIs(
+          node,
+          parent =>
+            parent.type === "MemberExpression" &&
+            isByRegenerator(parent.object),
+        )
+      ) {
+        // _context.t* // <-- t*
+        return true;
+      } else if (
+        parentIs(
+          node,
+          parent =>
+            parent.type === "VariableDeclarator" &&
+            parentIs(
+              parent,
+              parent =>
+                parent.type === "VariableDeclaration" &&
+                parentIs(
+                  parent,
+                  parent =>
+                    parent.type === "BlockStatement" &&
+                    parentIs(
+                      parent,
+                      parent =>
+                        parent.type === "FunctionExpression" &&
+                        isByRegenerator(parent.id),
+                    ),
+                ),
+            ),
+        )
+      ) {
+        // regeneratorRuntime.mark(function _callee3() {
+        //   var bar, _bar2; // <-- Those identifiers
+        return true;
+      } else if (
+        parentIs(
+          node,
+          parent =>
+            parent.type === "VariableDeclarator" &&
+            parentIs(
+              parent,
+              parent =>
+                parent.type === "VariableDeclaration" &&
+                parentIs(
+                  parent,
+                  parent =>
+                    parent.type === "BlockStatement" &&
+                    parent.body.length === 2 &&
+                    parent.body[1].type === "ReturnStatement" &&
+                    parent.body[1].argument.type === "CallExpression" &&
+                    parent.body[1].argument.callee.type ===
+                      "MemberExpression" &&
+                    parent.body[1].argument.callee.property.type ===
+                      "Identifier" &&
+                    parent.body[1].argument.callee.property.name === "wrap",
+                ),
+            ),
+        )
+      ) {
+        // function foo() {
+        //   var _len, // <-- Those identifiers
+        //     items,
+        //     _key,
+        //     _args = arguments;
+        //   return regeneratorRuntime.wrap(function foo$(_context) {
+        return true;
+      } else if (
+        parentIs(
+          node,
+          parent =>
+            parent.type === "CallExpression" &&
+            parent.arguments.length === 3 &&
+            parent.arguments[1] === node &&
+            parent.callee.type === "MemberExpression" &&
+            parent.callee.property.type === "Identifier" &&
+            parent.callee.property.name === "wrap",
+        )
+      ) {
+        // regeneratorRuntime.wrap(function foo$(_context) {
+        //   ...
+        // }, foo, this); // <- foo
+        return true;
+      } else if (
+        parentIs(
+          node,
+          parent =>
+            parent.type === "CallExpression" &&
+            parent.callee.type === "MemberExpression" &&
+            parent.callee.property.type === "Identifier" &&
+            parent.callee.property.name === "mark",
+        )
+      ) {
+        // regeneratorRuntime.mark(foo); // foo
+        return true;
+      }
+    } else if (node.type === "MemberExpression") {
+      // _context.next
+      return isByRegenerator(node.object);
+    } else if (node.type === "CallExpression") {
+      return isByRegenerator(node.callee);
+    } else if (node.type === "AssignmentExpression") {
+      // _context.next = 4;
+      return isByRegenerator(node.left);
+    } else if (node.type === "NumericLiteral") {
+      if (
+        parentIs(
+          node,
+          parent =>
+            parent.type === "AssignmentExpression" &&
+            isByRegenerator(parent.left),
+        )
+      ) {
+        // _context.next = 4; // <-- The 4
+        return true;
+      } else if (
+        parentIs(
+          node,
+          parent =>
+            parent.type === "CallExpression" &&
+            parent.callee.type === "MemberExpression" &&
+            isByRegenerator(parent.callee.object),
+        )
+      ) {
+        // return _context.abrupt("break", 11); // <-- The 11
+        return true;
+      }
+    }
+    return false;
+  };
+  const hidePrivateProperties = (key, val) => {
+    // Hides properties like _shadowedFunctionLiteral,
+    // which makes the AST circular
+    if (key[0] === "_") return "[Private]";
+    return val;
+  };
+  babel.types.traverseFast(ast, node => {
+    registerChildren(node);
+    if (isByRegenerator(node)) return;
+    if (nodes.has(node)) {
+      throw new Error(
+        "Do not reuse nodes. Use `t.cloneNode` to copy them.\n" +
+          JSON.stringify(node, hidePrivateProperties, 2) +
+          "\nParent:\n" +
+          JSON.stringify(parents.get(node), hidePrivateProperties, 2),
+      );
+    }
+    nodes.add(node);
+  });
+}
+
 function run(task) {
-  let actual = task.actual;
-  let expect = task.expect;
-  let exec   = task.exec;
-  let opts   = task.options;
+  const actual = task.actual;
+  const expected = task.expect;
+  const exec = task.exec;
+  const opts = task.options;
+  const optionsDir = task.optionsDir;
 
   function getOpts(self) {
-    let newOpts = _.merge({
-      filename: self.loc,
-    }, opts);
+    const newOpts = merge(
+      {
+        cwd: path.dirname(self.filename),
+        filename: self.loc,
+        filenameRelative: self.filename,
+        sourceFileName: self.filename,
+        sourceType: "script",
+        babelrc: false,
+        inputSourceMap: task.inputSourceMap || undefined,
+      },
+      opts,
+    );
 
-    newOpts.plugins = wrapPackagesArray("plugin", newOpts.plugins);
-    newOpts.presets = wrapPackagesArray("preset", newOpts.presets).map(function (val) {
-      return val[0];
+    newOpts.plugins = wrapPackagesArray("plugin", newOpts.plugins, optionsDir);
+    newOpts.presets = wrapPackagesArray(
+      "preset",
+      newOpts.presets,
+      optionsDir,
+    ).map(function(val) {
+      if (val.length > 2) {
+        throw new Error(
+          "Unexpected extra options " +
+            JSON.stringify(val.slice(2)) +
+            " passed to preset.",
+        );
+      }
+
+      return val;
     });
 
     return newOpts;
@@ -52,113 +360,177 @@ function run(task) {
 
   let execCode = exec.code;
   let result;
+  let resultExec;
 
   if (execCode) {
-    let execOpts = getOpts(exec);
+    const execOpts = getOpts(exec);
     result = babel.transform(execCode, execOpts);
+    checkDuplicatedNodes(result.ast);
     execCode = result.code;
 
     try {
-      runExec(execOpts, execCode);
+      resultExec = runCodeInTestContext(execCode, execOpts);
     } catch (err) {
-      err.message = exec.loc + ": " + err.message;
-      err.message += codeFrame(execCode);
+      // Pass empty location to include the whole file in the output.
+      err.message =
+        `${exec.loc}: ${err.message}\n` + codeFrameColumns(execCode, {});
       throw err;
     }
   }
 
   let actualCode = actual.code;
-  let expectCode = expect.code;
+  const expectCode = expected.code;
   if (!execCode || actualCode) {
-    result     = babel.transform(actualCode, getOpts(actual));
-    actualCode = result.code.trim();
+    result = babel.transform(actualCode, getOpts(actual));
+    checkDuplicatedNodes(result.ast);
+    if (
+      !expected.code &&
+      result.code &&
+      !opts.throws &&
+      fs.statSync(path.dirname(expected.loc)).isDirectory() &&
+      !process.env.CI
+    ) {
+      const expectedFile = expected.loc.replace(
+        /\.m?js$/,
+        result.sourceType === "module" ? ".mjs" : ".js",
+      );
 
-    try {
-      chai.expect(actualCode).to.be.equal(expectCode, actual.loc + " !== " + expect.loc);
-    } catch (err) {
-      //require("fs").writeFileSync(expect.loc, actualCode);
-      throw err;
+      console.log(`New test file created: ${expectedFile}`);
+      fs.writeFileSync(expectedFile, `${result.code}\n`);
+
+      if (expected.loc !== expectedFile) {
+        try {
+          fs.unlinkSync(expected.loc);
+        } catch (e) {}
+      }
+    } else {
+      actualCode = result.code.trim();
+      try {
+        expect(actualCode).toEqualFile({
+          filename: expected.loc,
+          code: expectCode,
+        });
+      } catch (e) {
+        if (!process.env.OVERWRITE) throw e;
+
+        console.log(`Updated test file: ${expected.loc}`);
+        fs.writeFileSync(expected.loc, `${result.code}\n`);
+      }
+
+      if (actualCode) {
+        expect(expected.loc).toMatch(
+          result.sourceType === "module" ? /\.mjs$/ : /\.js$/,
+        );
+      }
     }
   }
 
   if (task.sourceMap) {
-    chai.expect(result.map).to.deep.equal(task.sourceMap);
+    expect(result.map).toEqual(task.sourceMap);
   }
 
   if (task.sourceMappings) {
-    let consumer = new sourceMap.SourceMapConsumer(result.map);
+    const consumer = new sourceMap.SourceMapConsumer(result.map);
 
-    _.each(task.sourceMappings, function (mapping) {
-      let actual = mapping.original;
+    task.sourceMappings.forEach(function(mapping) {
+      const actual = mapping.original;
 
-      let expect = consumer.originalPositionFor(mapping.generated);
-      chai.expect({ line: expect.line, column: expect.column }).to.deep.equal(actual);
+      const expected = consumer.originalPositionFor(mapping.generated);
+      expect({ line: expected.line, column: expected.column }).toEqual(actual);
     });
+  }
+
+  if (execCode && resultExec) {
+    return resultExec;
   }
 }
 
-function runExec(opts, execCode) {
-  let sandbox = {
-    ...helpers,
-    babelHelpers,
-    assert: chai.assert,
-    transform: babel.transform,
-    opts,
-    exports: {},
-  };
+const toEqualFile = () => ({
+  compare: (actual, { filename, code }) => {
+    const pass = actual === code;
+    return {
+      pass,
+      message: () => {
+        const diffString = diff(code, actual, {
+          expand: false,
+        });
+        return (
+          `Expected ${filename} to match transform output.\n` +
+          `To autogenerate a passing version of this file, delete the file and re-run the tests.\n\n` +
+          `Diff:\n\n${diffString}`
+        );
+      },
+    };
+  },
+  negativeCompare: () => {
+    throw new Error("Negation unsupported");
+  },
+});
 
-  let fn = new Function(...Object.keys(sandbox), execCode);
-  return fn.apply(null, Object.values(sandbox));
-}
-
-export default function (
+export default function(
   fixturesLoc: string,
   name: string,
   suiteOpts = {},
   taskOpts = {},
   dynamicOpts?: Function,
 ) {
-  let suites = getFixtures(fixturesLoc);
+  const suites = getFixtures(fixturesLoc);
 
-  for (let testSuite of suites) {
-    if (_.contains(suiteOpts.ignoreSuites, testSuite.title)) continue;
+  for (const testSuite of suites) {
+    if (includes(suiteOpts.ignoreSuites, testSuite.title)) continue;
 
-    suite(name + "/" + testSuite.title, function () {
-      for (let task of testSuite.tests) {
-        if (_.contains(suiteOpts.ignoreTasks, task.title) ||
-            _.contains(suiteOpts.ignoreTasks, testSuite.title + "/" + task.title)) continue;
+    describe(name + "/" + testSuite.title, function() {
+      jest.addMatchers({
+        toEqualFile,
+      });
 
-        test(task.title, !task.disabled && function () {
-          function runTask() {
-            run(task);
-          }
+      for (const task of testSuite.tests) {
+        if (
+          includes(suiteOpts.ignoreTasks, task.title) ||
+          includes(suiteOpts.ignoreTasks, testSuite.title + "/" + task.title)
+        ) {
+          continue;
+        }
 
-          _.defaults(task.options, {
-            filenameRelative: task.expect.filename,
-            sourceFileName:   task.actual.filename,
-            sourceMapTarget:  task.expect.filename,
-            suppressDeprecationMessages: true,
-            babelrc: false,
-            sourceMap: !!(task.sourceMappings || task.sourceMap),
-          });
+        it(
+          task.title,
+          !task.disabled &&
+            function() {
+              function runTask() {
+                run(task);
+              }
 
-          _.extend(task.options, taskOpts);
+              defaults(task.options, {
+                sourceMap: !!(task.sourceMappings || task.sourceMap),
+              });
 
-          if (dynamicOpts) dynamicOpts(task.options, task);
+              extend(task.options, taskOpts);
 
-          let throwMsg = task.options.throws;
-          if (throwMsg) {
-            // internal api doesn't have this option but it's best not to pollute
-            // the options object with useless options
-            delete task.options.throws;
+              if (dynamicOpts) dynamicOpts(task.options, task);
 
-            assert.throws(runTask, function (err) {
-              return throwMsg === true || err.message.indexOf(throwMsg) >= 0;
-            });
-          } else {
-            runTask();
-          }
-        });
+              const throwMsg = task.options.throws;
+              if (throwMsg) {
+                // internal api doesn't have this option but it's best not to pollute
+                // the options object with useless options
+                delete task.options.throws;
+
+                assert.throws(runTask, function(err) {
+                  return (
+                    throwMsg === true || err.message.indexOf(throwMsg) >= 0
+                  );
+                });
+              } else {
+                if (task.exec.code) {
+                  const result = run(task);
+                  if (result && typeof result.then === "function") {
+                    return result;
+                  }
+                } else {
+                  runTask();
+                }
+              }
+            },
+        );
       }
     });
   }

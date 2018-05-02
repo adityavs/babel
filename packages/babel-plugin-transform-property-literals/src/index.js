@@ -1,16 +1,24 @@
-export default function ({ types: t }) {
+import { declare } from "@babel/helper-plugin-utils";
+import { types as t } from "@babel/core";
+
+export default declare(api => {
+  api.assertVersion(7);
+
   return {
     visitor: {
       ObjectProperty: {
         exit({ node }) {
-          let key = node.key;
-          if (t.isLiteral(key) && t.isValidIdentifier(key.value)) {
-            // "foo": "bar" -> foo: "bar"
-            node.key = t.identifier(key.value);
-            node.computed = false;
+          const key = node.key;
+          if (
+            !node.computed &&
+            t.isIdentifier(key) &&
+            !t.isValidES3Identifier(key.name)
+          ) {
+            // default: "bar" -> "default": "bar"
+            node.key = t.stringLiteral(key.name);
           }
-        }
-      }
-    }
+        },
+      },
+    },
   };
-}
+});

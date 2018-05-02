@@ -1,82 +1,185 @@
-let outputFileSync = require("output-file-sync");
-let pathExists     = require("path-exists");
-let slash          = require("slash");
-let path           = require("path");
-let util           = require("./util");
-let fs             = require("fs");
-let _              = require("lodash");
+import defaults from "lodash/defaults";
+import outputFileSync from "output-file-sync";
+import slash from "slash";
+import path from "path";
+import fs from "fs";
 
-module.exports = function (commander, filenames) {
-  function write(src, relative) {
+import * as util from "./util";
+
+let compiledFiles = 0;
+
+export default function(commander, filenames, opts) {
+  function write(src, relative, base, callback) {
+    if (typeof base === "function") {
+      callback = base;
+      base = undefined;
+    }
+    if (!util.isCompilableExtension(relative, commander.extensions)) {
+      return process.nextTick(callback);
+    }
+
     // remove extension and then append back on .js
-    relative = relative.replace(/\.(\w*?)$/, "") + ".js";
+    relative = util.adjustRelative(relative, commander.keepFileExtension);
 
-    let dest = path.join(commander.outDir, relative);
+    const dest = getDest(commander, relative, base);
 
-    let data = util.compile(src, {
-      sourceFileName: slash(path.relative(dest + "/..", src)),
-      sourceMapTarget: path.basename(relative)
+    util.compile(
+      src,
+      defaults(
+        {
+          sourceFileName: slash(path.relative(dest + "/..", src)),
+        },
+        opts,
+      ),
+      function(err, res) {
+        if (err) return callback(err);
+        if (!res) return callback();
+
+        // we've requested explicit sourcemaps to be written to disk
+        if (
+          res.map &&
+          commander.sourceMaps &&
+          commander.sourceMaps !== "inline"
+        ) {
+          const mapLoc = dest + ".map";
+          res.code = util.addSourceMappingUrl(res.code, mapLoc);
+          res.map.file = path.basename(relative);
+          outputFileSync(mapLoc, JSON.stringify(res.map));
+        }
+
+        outputFileSync(dest, res.code);
+        util.chmod(src, dest);
+
+        compiledFiles += 1;
+
+        util.log(src + " -> " + dest);
+        return callback(null, true);
+      },
+    );
+  }
+
+  function getDest(commander, filename, base) {
+    if (commander.relative) return path.join(base, commander.outDir, filename);
+    return path.join(commander.outDir, filename);
+  }
+
+  function outputDestFolder(outDir) {
+    const outDirPath = path.resolve(outDir);
+    if (!fs.existsSync(outDirPath)) {
+      fs.mkdirSync(outDirPath);
+    }
+  }
+
+  function handleFile(src, filename, base, callback) {
+    if (typeof base === "function") {
+      callback = base;
+      base = undefined;
+    }
+
+    write(src, filename, base, function(err, res) {
+      if (err) return callback(err);
+      if (!res && commander.copyFiles) {
+        const dest = getDest(commander, filename, base);
+        outputFileSync(dest, fs.readFileSync(src));
+        util.chmod(src, dest);
+      }
+
+      return callback();
     });
-    if (!commander.copyFiles && data.ignored) return;
-
-    // we've requested explicit sourcemaps to be written to disk
-    if (data.map && commander.sourceMaps && commander.sourceMaps !== "inline") {
-      let mapLoc = dest + ".map";
-      data.code = util.addSourceMappingUrl(data.code, mapLoc);
-      outputFileSync(mapLoc, JSON.stringify(data.map));
-    }
-
-    outputFileSync(dest, data.code);
-    util.chmod(src, dest);
-
-    util.log(src + " -> " + dest);
   }
 
-  function handleFile(src, filename) {
-    if (util.shouldIgnore(src)) return;
-
-    if (util.canCompile(filename, commander.extensions)) {
-      write(src, filename);
-    } else if (commander.copyFiles) {
-      let dest = path.join(commander.outDir, filename);
-      outputFileSync(dest, fs.readFileSync(src));
-      util.chmod(src, dest);
+  function sequentialHandleFile(files, dirname, index, callback) {
+    if (files.length === 0) {
+      outputDestFolder(commander.outDir);
+      return;
     }
+
+    if (typeof index === "function") {
+      callback = index;
+      index = 0;
+    }
+
+    const filename = files[index];
+    const src = path.join(dirname, filename);
+
+    handleFile(src, filename, dirname, function(err) {
+      if (err) return callback(err);
+      index++;
+      if (index !== files.length) {
+        sequentialHandleFile(files, dirname, index, callback);
+      } else {
+        callback();
+      }
+    });
   }
 
-  function handle(filename) {
-    if (!pathExists.sync(filename)) return;
+  function handle(filename, callback) {
+    if (!fs.existsSync(filename)) return;
 
-    let stat = fs.statSync(filename);
+    const stat = fs.statSync(filename);
 
     if (stat.isDirectory(filename)) {
-      let dirname = filename;
+      const dirname = filename;
 
-      _.each(util.readdir(dirname), function (filename) {
-        let src = path.join(dirname, filename);
-        handleFile(src, filename);
-      });
+      if (commander.deleteDirOnStart) {
+        util.deleteDir(commander.outDir);
+      }
+
+      const files = util.readdir(dirname, commander.includeDotfiles);
+      sequentialHandleFile(files, dirname, callback);
     } else {
-      write(filename, filename);
+      write(
+        filename,
+        path.basename(filename),
+        path.dirname(filename),
+        callback,
+      );
     }
   }
 
-  _.each(filenames, handle);
+  function sequentialHandle(filenames, index = 0) {
+    const filename = filenames[index];
+
+    handle(filename, function(err) {
+      if (err) throw new Error(err);
+      index++;
+      if (index !== filenames.length) {
+        sequentialHandle(filenames, index);
+      } else {
+        util.log(
+          `🎉  Successfully compiled ${compiledFiles} ${
+            compiledFiles > 1 ? "files" : "file"
+          } with Babel.`,
+          true,
+        );
+      }
+    });
+  }
+
+  if (!commander.skipInitialBuild) {
+    sequentialHandle(filenames);
+  }
 
   if (commander.watch) {
-    let chokidar = util.requireChokidar();
+    const chokidar = util.requireChokidar();
 
-    _.each(filenames, function (dirname) {
-      let watcher = chokidar.watch(dirname, {
+    filenames.forEach(function(dirname) {
+      const watcher = chokidar.watch(dirname, {
         persistent: true,
-        ignoreInitial: true
+        ignoreInitial: true,
+        awaitWriteFinish: {
+          stabilityThreshold: 50,
+          pollInterval: 10,
+        },
       });
 
-      _.each(["add", "change"], function (type) {
-        watcher.on(type, function (filename) {
-          let relative = path.relative(dirname, filename) || filename;
+      ["add", "change"].forEach(function(type) {
+        watcher.on(type, function(filename) {
+          const relative = path.relative(dirname, filename) || filename;
           try {
-            handleFile(filename, relative);
+            handleFile(filename, relative, function(err) {
+              if (err) throw err;
+            });
           } catch (err) {
             console.error(err.stack);
           }
@@ -84,4 +187,4 @@ module.exports = function (commander, filenames) {
       });
     });
   }
-};
+}

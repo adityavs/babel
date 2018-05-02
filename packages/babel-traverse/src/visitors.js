@@ -1,7 +1,6 @@
 import * as virtualTypes from "./path/lib/virtual-types";
-import * as messages from "babel-messages";
-import * as t from "babel-types";
-import clone from "lodash/lang/clone";
+import * as t from "@babel/types";
+import clone from "lodash/clone";
 
 /**
  * explode() will take a visitor object with all of the various shorthands
@@ -11,7 +10,7 @@ import clone from "lodash/lang/clone";
  * The various shorthands are:
  * * `Identifier() { ... }` -> `Identifier: { enter() { ... } }`
  * * `"Identifier|NumericLiteral": { ... }` -> `Identifier: { ... }, NumericLiteral: { ... }`
- * * Aliases in `babel-types`: e.g. `Property: { ... }` -> `ObjectProperty: { ... }, ClassProperty: { ... }`
+ * * Aliases in `@babel/types`: e.g. `Property: { ... }` -> `ObjectProperty: { ... }, ClassProperty: { ... }`
  *
  * Other normalizations are:
  * * Visitors of virtual types are wrapped, so that they are only visited when
@@ -24,16 +23,16 @@ export function explode(visitor) {
   visitor._exploded = true;
 
   // normalise pipes
-  for (let nodeType in visitor) {
+  for (const nodeType in visitor) {
     if (shouldIgnoreKey(nodeType)) continue;
 
-    let parts: Array<string> = nodeType.split("|");
+    const parts: Array<string> = nodeType.split("|");
     if (parts.length === 1) continue;
 
-    let fns = visitor[nodeType];
+    const fns = visitor[nodeType];
     delete visitor[nodeType];
 
-    for (let part of parts) {
+    for (const part of parts) {
       visitor[part] = fns;
     }
   }
@@ -52,15 +51,15 @@ export function explode(visitor) {
   ensureCallbackArrays(visitor);
 
   // add type wrappers
-  for (let nodeType of (Object.keys(visitor): Array)) {
+  for (const nodeType of (Object.keys(visitor): Array)) {
     if (shouldIgnoreKey(nodeType)) continue;
 
-    let wrapper = virtualTypes[nodeType];
+    const wrapper = virtualTypes[nodeType];
     if (!wrapper) continue;
 
     // wrap all the functions
-    let fns = visitor[nodeType];
-    for (let type in fns) {
+    const fns = visitor[nodeType];
+    for (const type in fns) {
       fns[type] = wrapCheck(wrapper, fns[type]);
     }
 
@@ -68,7 +67,7 @@ export function explode(visitor) {
     delete visitor[nodeType];
 
     if (wrapper.types) {
-      for (let type of (wrapper.types: Array<string>)) {
+      for (const type of (wrapper.types: Array<string>)) {
         // merge the visitor if necessary or just put it back in
         if (visitor[type]) {
           mergePair(visitor[type], fns);
@@ -82,16 +81,18 @@ export function explode(visitor) {
   }
 
   // add aliases
-  for (let nodeType in visitor) {
+  for (const nodeType in visitor) {
     if (shouldIgnoreKey(nodeType)) continue;
 
-    let fns = visitor[nodeType];
+    const fns = visitor[nodeType];
 
     let aliases: ?Array<string> = t.FLIPPED_ALIAS_KEYS[nodeType];
 
-    let deprecratedKey = t.DEPRECATED_KEYS[nodeType];
+    const deprecratedKey = t.DEPRECATED_KEYS[nodeType];
     if (deprecratedKey) {
-      console.trace(`Visitor defined for ${nodeType} but it has been renamed to ${deprecratedKey}`);
+      console.trace(
+        `Visitor defined for ${nodeType} but it has been renamed to ${deprecratedKey}`,
+      );
       aliases = [deprecratedKey];
     }
 
@@ -100,8 +101,8 @@ export function explode(visitor) {
     // clear it from the visitor
     delete visitor[nodeType];
 
-    for (let alias of aliases) {
-      let existing = visitor[alias];
+    for (const alias of aliases) {
+      const existing = visitor[alias];
       if (existing) {
         mergePair(existing, fns);
       } else {
@@ -110,7 +111,7 @@ export function explode(visitor) {
     }
   }
 
-  for (let nodeType in visitor) {
+  for (const nodeType in visitor) {
     if (shouldIgnoreKey(nodeType)) continue;
 
     ensureCallbackArrays(visitor[nodeType]);
@@ -123,10 +124,13 @@ export function verify(visitor) {
   if (visitor._verified) return;
 
   if (typeof visitor === "function") {
-    throw new Error(messages.get("traverseVerifyRootFunction"));
+    throw new Error(
+      "You passed `traverse()` a function when it expected a visitor object, " +
+        "are you sure you didn't mean `{ enter: Function }`?",
+    );
   }
 
-  for (let nodeType in visitor) {
+  for (const nodeType in visitor) {
     if (nodeType === "enter" || nodeType === "exit") {
       validateVisitorMethods(nodeType, visitor[nodeType]);
     }
@@ -134,17 +138,25 @@ export function verify(visitor) {
     if (shouldIgnoreKey(nodeType)) continue;
 
     if (t.TYPES.indexOf(nodeType) < 0) {
-      throw new Error(messages.get("traverseVerifyNodeType", nodeType));
+      throw new Error(
+        `You gave us a visitor for the node type ${nodeType} but it's not a valid type`,
+      );
     }
 
-    let visitors = visitor[nodeType];
+    const visitors = visitor[nodeType];
     if (typeof visitors === "object") {
-      for (let visitorKey in visitors) {
+      for (const visitorKey in visitors) {
         if (visitorKey === "enter" || visitorKey === "exit") {
           // verify that it just contains functions
-          validateVisitorMethods(`${nodeType}.${visitorKey}`, visitors[visitorKey]);
+          validateVisitorMethods(
+            `${nodeType}.${visitorKey}`,
+            visitors[visitorKey],
+          );
         } else {
-          throw new Error(messages.get("traverseVerifyVisitorProperty", nodeType, visitorKey));
+          throw new Error(
+            "You passed `traverse()` a visitor object with the property " +
+              `${nodeType} that has the invalid property ${visitorKey}`,
+          );
         }
       }
     }
@@ -154,30 +166,38 @@ export function verify(visitor) {
 }
 
 function validateVisitorMethods(path, val) {
-  let fns = [].concat(val);
-  for (let fn of fns) {
+  const fns = [].concat(val);
+  for (const fn of fns) {
     if (typeof fn !== "function") {
-      throw new TypeError(`Non-function found defined in ${path} with type ${typeof fn}`);
+      throw new TypeError(
+        `Non-function found defined in ${path} with type ${typeof fn}`,
+      );
     }
   }
 }
 
-export function merge(visitors: Array, states: Array = []) {
-  let rootVisitor = {};
+export function merge(
+  visitors: Array,
+  states: Array = [],
+  wrapper?: ?Function,
+) {
+  const rootVisitor = {};
 
   for (let i = 0; i < visitors.length; i++) {
-    let visitor = visitors[i];
-    let state = states[i];
+    const visitor = visitors[i];
+    const state = states[i];
 
     explode(visitor);
 
-    for (let type in visitor) {
+    for (const type in visitor) {
       let visitorType = visitor[type];
 
-      // if we have state then overload the callbacks to take it
-      if (state) visitorType = wrapWithState(visitorType, state);
+      // if we have state or wrapper then overload the callbacks to take it
+      if (state || wrapper) {
+        visitorType = wrapWithStateOrWrapper(visitorType, state, wrapper);
+      }
 
-      let nodeVisitor = rootVisitor[type] = rootVisitor[type] || {};
+      const nodeVisitor = (rootVisitor[type] = rootVisitor[type] || {});
       mergePair(nodeVisitor, visitorType);
     }
   }
@@ -185,20 +205,28 @@ export function merge(visitors: Array, states: Array = []) {
   return rootVisitor;
 }
 
-function wrapWithState(oldVisitor, state) {
-  let newVisitor = {};
+function wrapWithStateOrWrapper(oldVisitor, state, wrapper: ?Function) {
+  const newVisitor = {};
 
-  for (let key in oldVisitor) {
+  for (const key in oldVisitor) {
     let fns = oldVisitor[key];
 
     // not an enter/exit array of callbacks
     if (!Array.isArray(fns)) continue;
 
-    fns = fns.map(function (fn) {
-      let newFn = function (path) {
-        return fn.call(state, path, state);
-      };
-      newFn.toString = () => fn.toString();
+    fns = fns.map(function(fn) {
+      let newFn = fn;
+
+      if (state) {
+        newFn = function(path) {
+          return fn.call(state, path, state);
+        };
+      }
+
+      if (wrapper) {
+        newFn = wrapper(state.key, key, newFn);
+      }
+
       return newFn;
     });
 
@@ -209,23 +237,23 @@ function wrapWithState(oldVisitor, state) {
 }
 
 function ensureEntranceObjects(obj) {
-  for (let key in obj) {
+  for (const key in obj) {
     if (shouldIgnoreKey(key)) continue;
 
-    let fns = obj[key];
+    const fns = obj[key];
     if (typeof fns === "function") {
       obj[key] = { enter: fns };
     }
   }
 }
 
-function ensureCallbackArrays(obj){
+function ensureCallbackArrays(obj) {
   if (obj.enter && !Array.isArray(obj.enter)) obj.enter = [obj.enter];
   if (obj.exit && !Array.isArray(obj.exit)) obj.exit = [obj.exit];
 }
 
 function wrapCheck(wrapper, fn) {
-  let newFn = function (path) {
+  const newFn = function(path) {
     if (wrapper.checkPath(path)) {
       return fn.apply(this, arguments);
     }
@@ -242,13 +270,15 @@ function shouldIgnoreKey(key) {
   if (key === "enter" || key === "exit" || key === "shouldSkip") return true;
 
   // ignore other options
-  if (key === "blacklist" || key === "noScope" || key === "skipKeys") return true;
+  if (key === "blacklist" || key === "noScope" || key === "skipKeys") {
+    return true;
+  }
 
   return false;
 }
 
 function mergePair(dest, src) {
-  for (let key in src) {
+  for (const key in src) {
     dest[key] = [].concat(dest[key] || [], src[key]);
   }
 }

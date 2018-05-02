@@ -6,6 +6,7 @@ export function remove() {
   this._assertUnremoved();
 
   this.resync();
+  this._removeFromScope();
 
   if (this._callRemovalHooks()) {
     this._markRemoved();
@@ -17,8 +18,13 @@ export function remove() {
   this._markRemoved();
 }
 
+export function _removeFromScope() {
+  const bindings = this.getBindingIdentifiers();
+  Object.keys(bindings).forEach(name => this.scope.removeBinding(name));
+}
+
 export function _callRemovalHooks() {
-  for (let fn of (hooks: Array<Function>)) {
+  for (const fn of (hooks: Array<Function>)) {
     if (fn(this, this.parentPath)) return true;
   }
 }
@@ -34,12 +40,14 @@ export function _remove() {
 
 export function _markRemoved() {
   this.shouldSkip = true;
-  this.removed    = true;
-  this.node       = null;
+  this.removed = true;
+  this.node = null;
 }
 
 export function _assertUnremoved() {
   if (this.removed) {
-    throw this.buildCodeFrameError("NodePath has been removed so is read-only.");
+    throw this.buildCodeFrameError(
+      "NodePath has been removed so is read-only.",
+    );
   }
 }

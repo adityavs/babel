@@ -1,4 +1,10 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
-node node_modules/istanbul/lib/cli.js cover node_modules/mocha/bin/_mocha -- `scripts/_get-test-directories.sh` --opts test/mocha.opts
+jestArgs="--coverage"
+
+if [ -n "$CI" ]; then
+  jestArgs="${jestArgs} --maxWorkers=4 --ci"
+fi
+
+node_modules/.bin/jest $jestArgs

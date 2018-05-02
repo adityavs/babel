@@ -1,33 +1,29 @@
-# babel-plugin-transform-property-literals
+# @babel/plugin-transform-property-literals
 
-Turn valid property key literals to plain identifiers
+> Ensure that reserved words are quoted in object property keys
 
 ## Example
 
 **In**
 
 ```javascript
-var obj = {
-  "foo": "isValid",
-  var: "isKeyword",
-  "const": "isKeyword"
+var foo = {
+  catch: function () {}
 };
 ```
 
 **Out**
 
 ```javascript
-var obj = {
-  foo: "isValid",
-  "var": "isKeyword",
-  "const": "isKeyword"
+var foo = {
+  "catch": function () {}
 };
 ```
 
 ## Installation
 
 ```sh
-$ npm install babel-plugin-transform-property-literals
+npm install --save-dev @babel/plugin-transform-property-literals
 ```
 
 ## Usage
@@ -38,20 +34,20 @@ $ npm install babel-plugin-transform-property-literals
 
 ```json
 {
-  "plugins": ["transform-property-literals"]
+  "plugins": ["@babel/plugin-transform-property-literals"]
 }
 ```
 
 ### Via CLI
 
 ```sh
-$ babel --plugins transform-property-literals script.js
+babel --plugins @babel/plugin-transform-property-literals script.js
 ```
 
 ### Via Node API
 
 ```javascript
-require("babel-core").transform("code", {
-  plugins: ["transform-property-literals"]
+require("@babel/core").transform("code", {
+  plugins: ["@babel/plugin-transform-property-literals"]
 });
 ```

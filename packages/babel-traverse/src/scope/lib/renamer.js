@@ -1,7 +1,8 @@
 import Binding from "../binding";
-import * as t from "babel-types";
+import splitExportDeclaration from "@babel/helper-split-export-declaration";
+import * as t from "@babel/types";
 
-let renameVisitor = {
+const renameVisitor = {
   ReferencedIdentifier({ node }, state) {
     if (node.name === state.oldName) {
       node.name = state.newName;
@@ -9,18 +10,23 @@ let renameVisitor = {
   },
 
   Scope(path, state) {
-    if (!path.scope.bindingIdentifierEquals(state.oldName, state.binding.identifier)) {
+    if (
+      !path.scope.bindingIdentifierEquals(
+        state.oldName,
+        state.binding.identifier,
+      )
+    ) {
       path.skip();
     }
   },
 
   "AssignmentExpression|Declaration"(path, state) {
-    let ids = path.getOuterBindingIdentifiers();
+    const ids = path.getOuterBindingIdentifiers();
 
-    for (let name in ids) {
+    for (const name in ids) {
       if (name === state.oldName) ids[name].name = state.newName;
     }
-  }
+  },
 };
 
 export default class Renamer {
@@ -35,37 +41,20 @@ export default class Renamer {
   binding: Binding;
 
   maybeConvertFromExportDeclaration(parentDeclar) {
-    let exportDeclar = parentDeclar.parentPath.isExportDeclaration() && parentDeclar.parentPath;
-    if (!exportDeclar) return;
+    const maybeExportDeclar = parentDeclar.parentPath;
 
-    // build specifiers that point back to this export declaration
-    let isDefault = exportDeclar.isExportDefaultDeclaration();
-
-    if (isDefault && (parentDeclar.isFunctionDeclaration() ||
-        parentDeclar.isClassDeclaration())&& !parentDeclar.node.id) {
-      // Ensure that default class and function exports have a name so they have a identifier to
-      // reference from the export specifier list.
-      parentDeclar.node.id = parentDeclar.scope.generateUidIdentifier("default");
+    if (!maybeExportDeclar.isExportDeclaration()) {
+      return;
     }
 
-    let bindingIdentifiers = parentDeclar.getOuterBindingIdentifiers();
-    let specifiers = [];
-
-    for (let name in bindingIdentifiers) {
-      let localName = name === this.oldName ? this.newName : name;
-      let exportedName = isDefault ? "default" : name;
-      specifiers.push(t.exportSpecifier(t.identifier(localName), t.identifier(exportedName)));
+    if (
+      maybeExportDeclar.isExportDefaultDeclaration() &&
+      !maybeExportDeclar.get("declaration").node.id
+    ) {
+      return;
     }
 
-    let aliasDeclar = t.exportNamedDeclaration(null, specifiers);
-
-    // hoist to the top if it's a function
-    if (parentDeclar.isFunctionDeclaration()) {
-      aliasDeclar._blockHoist = 3;
-    }
-
-    exportDeclar.insertAfter(aliasDeclar);
-    exportDeclar.replaceWith(parentDeclar.node);
+    splitExportDeclaration(maybeExportDeclar);
   }
 
   maybeConvertFromClassFunctionDeclaration(path) {
@@ -79,9 +68,14 @@ export default class Renamer {
     path.node.id = t.identifier(this.oldName);
     path.node._blockHoist = 3;
 
-    path.replaceWith(t.variableDeclaration("let", [
-      t.variableDeclarator(t.identifier(this.newName), t.toExpression(path.node))
-    ]));
+    path.replaceWith(
+      t.variableDeclaration("let", [
+        t.variableDeclarator(
+          t.identifier(this.newName),
+          t.toExpression(path.node),
+        ),
+      ]),
+    );
   }
 
   maybeConvertFromClassFunctionExpression(path) {
@@ -95,17 +89,24 @@ export default class Renamer {
     path.node.id = t.identifier(this.oldName);
 
     this.binding.scope.parent.push({
-      id: t.identifier(this.newName)
+      id: t.identifier(this.newName),
     });
 
-    path.replaceWith(t.assignmentExpression("=", t.identifier(this.newName), path.node));
+    path.replaceWith(
+      t.assignmentExpression("=", t.identifier(this.newName), path.node),
+    );
   }
 
   rename(block?) {
-    let { binding, oldName, newName } = this;
-    let { scope, path } = binding;
+    const { binding, oldName, newName } = this;
+    const { scope, path } = binding;
 
-    let parentDeclar = path.find((path) => path.isDeclaration() || path.isFunctionExpression());
+    const parentDeclar = path.find(
+      path =>
+        path.isDeclaration() ||
+        path.isFunctionExpression() ||
+        path.isClassExpression(),
+    );
     if (parentDeclar) {
       this.maybeConvertFromExportDeclaration(parentDeclar);
     }

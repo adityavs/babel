@@ -1,124 +1,85 @@
 /* @noflow */
 
-import type { NodePath } from "babel-traverse";
-import nameFunction from "babel-helper-function-name";
-import template from "babel-template";
-import * as t from "babel-types";
+import type { NodePath } from "@babel/traverse";
+import wrapFunction from "@babel/helper-wrap-function";
+import annotateAsPure from "@babel/helper-annotate-as-pure";
+import * as t from "@babel/types";
 
-let buildWrapper = template(`
-  (() => {
-    var ref = FUNCTION;
-    return function NAME(PARAMS) {
-      return ref.apply(this, arguments);
-    };
-  })
-`);
-
-let namedBuildWrapper = template(`
-  (() => {
-    var ref = FUNCTION;
-    function NAME(PARAMS) {
-      return ref.apply(this, arguments);
-    }
-    return NAME;
-  })
-`);
-
-let awaitVisitor = {
-  ArrowFunctionExpression(path) {
-    if (!path.node.async) {
-      path.arrowFunctionToShadowed();
-    }
+const awaitVisitor = {
+  Function(path) {
+    path.skip();
   },
 
-  AwaitExpression({ node }) {
-    node.type = "YieldExpression";
-  }
+  AwaitExpression(path, { wrapAwait }) {
+    const argument = path.get("argument");
+
+    if (path.parentPath.isYieldExpression()) {
+      path.replaceWith(argument.node);
+      return;
+    }
+
+    path.replaceWith(
+      t.yieldExpression(
+        wrapAwait
+          ? t.callExpression(t.cloneNode(wrapAwait), [argument.node])
+          : argument.node,
+      ),
+    );
+  },
 };
 
-function classOrObjectMethod(path: NodePath, callId: Object) {
-  let node = path.node;
-  let body = node.body;
+export default function(
+  path: NodePath,
+  helpers: { wrapAsync: Object, wrapAwait: Object },
+) {
+  path.traverse(awaitVisitor, {
+    wrapAwait: helpers.wrapAwait,
+  });
 
-  node.async = false;
+  const isIIFE = checkIsIIFE(path);
 
-  let container = t.functionExpression(null, [], t.blockStatement(body.body), true);
-  container.shadow = true;
-  body.body = [
-    t.returnStatement(t.callExpression(
-      t.callExpression(callId, [container]),
-      []
-    ))
-  ];
-}
+  path.node.async = false;
+  path.node.generator = true;
 
-function plainFunction(path: NodePath, callId: Object) {
-  let node = path.node;
-  let isDeclaration = path.isFunctionDeclaration();
-  let asyncFnId = node.id;
-  let wrapper = buildWrapper;
+  wrapFunction(path, t.cloneNode(helpers.wrapAsync));
 
-  if (path.isArrowFunctionExpression()) {
-    path.arrowFunctionToShadowed();
-  } else if (!isDeclaration && asyncFnId) {
-    wrapper = namedBuildWrapper;
+  const isProperty =
+    path.isObjectMethod() ||
+    path.isClassMethod() ||
+    path.parentPath.isObjectProperty() ||
+    path.parentPath.isClassProperty();
+
+  if (!isProperty && !isIIFE && path.isExpression()) {
+    annotateAsPure(path);
   }
 
-  node.async = false;
-  node.generator = true;
-
-  node.id = null;
-
-  if (isDeclaration) {
-    node.type = "FunctionExpression";
-  }
-
-  let built = t.callExpression(callId, [node]);
-  let container = wrapper({
-    NAME: asyncFnId,
-    FUNCTION: built,
-    PARAMS: node.params.map(() => path.scope.generateUidIdentifier("x"))
-  }).expression;
-
-  if (isDeclaration) {
-    let declar = t.variableDeclaration("let", [
-      t.variableDeclarator(
-        t.identifier(asyncFnId.name),
-        t.callExpression(container, [])
-      )
-    ]);
-    declar._blockHoist = true;
-
-    path.replaceWith(declar);
-  } else {
-    let retFunction = container.body.body[1].argument;
-    if (!asyncFnId) {
-      nameFunction({
-        node: retFunction,
-        parent: path.parent,
-        scope: path.scope
-      });
+  function checkIsIIFE(path: NodePath) {
+    if (path.parentPath.isCallExpression({ callee: path.node })) {
+      return true;
     }
 
-    if (!retFunction || retFunction.id || node.params.length) {
-      // we have an inferred function id or params so we need this wrapper
-      path.replaceWith(t.callExpression(container, []));
-    } else {
-      // we can omit this wrapper as the conditions it protects for do not apply
-      path.replaceWith(built);
+    // try to catch calls to Function#bind, as emitted by arrowFunctionToExpression in spec mode
+    // this may also catch .bind(this) written by users, but does it matter? 🤔
+    const { parentPath } = path;
+    if (
+      parentPath.isMemberExpression() &&
+      t.isIdentifier(parentPath.node.property, { name: "bind" })
+    ) {
+      const { parentPath: bindCall } = parentPath;
+
+      // (function () { ... }).bind(this)()
+
+      return (
+        // first, check if the .bind is actually being called
+        bindCall.isCallExpression() &&
+        // and whether its sole argument is 'this'
+        bindCall.node.arguments.length === 1 &&
+        t.isThisExpression(bindCall.node.arguments[0]) &&
+        // and whether the result of the .bind(this) is being called
+        bindCall.parentPath.isCallExpression({ callee: bindCall.node })
+      );
     }
-  }
-}
 
-export default function (path: NodePath, callId: Object) {
-  let node = path.node;
-  if (node.generator) return;
-
-  path.traverse(awaitVisitor);
-
-  if (path.isClassMethod() || path.isObjectMethod()) {
-    return classOrObjectMethod(path, callId);
-  } else {
-    return plainFunction(path, callId);
+    return false;
   }
 }

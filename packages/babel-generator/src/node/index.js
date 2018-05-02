@@ -1,23 +1,44 @@
-import whitespace from "./whitespace";
+import * as whitespace from "./whitespace";
 import * as parens from "./parentheses";
-import * as t from "babel-types";
+import * as t from "@babel/types";
 
-function find(obj, node, parent, printStack) {
-  if (!obj) return;
-  let result;
+function expandAliases(obj) {
+  const newObj = {};
 
-  let types = Object.keys(obj);
-  for (let i = 0; i < types.length; i++) {
-    let type = types[i];
+  function add(type, func) {
+    const fn = newObj[type];
+    newObj[type] = fn
+      ? function(node, parent, stack) {
+          const result = fn(node, parent, stack);
 
-    if (t.is(type, node)) {
-      let fn = obj[type];
-      result = fn(node, parent, printStack);
-      if (result != null) break;
+          return result == null ? func(node, parent, stack) : result;
+        }
+      : func;
+  }
+
+  for (const type of Object.keys(obj)) {
+    const aliases = t.FLIPPED_ALIAS_KEYS[type];
+    if (aliases) {
+      for (const alias of aliases) {
+        add(alias, obj[type]);
+      }
+    } else {
+      add(type, obj[type]);
     }
   }
 
-  return result;
+  return newObj;
+}
+
+// Rather than using `t.is` on each object property, we pre-expand any type aliases
+// into concrete types so that the 'find' call below can be as fast as possible.
+const expandedParens = expandAliases(parens);
+const expandedWhitespaceNodes = expandAliases(whitespace.nodes);
+const expandedWhitespaceList = expandAliases(whitespace.list);
+
+function find(obj, node, parent, printStack) {
+  const fn = obj[node.type];
+  return fn ? fn(node, parent, printStack) : null;
 }
 
 function isOrHasCallExpression(node) {
@@ -26,16 +47,13 @@ function isOrHasCallExpression(node) {
   }
 
   if (t.isMemberExpression(node)) {
-    return isOrHasCallExpression(node.object) ||
-      (!node.computed && isOrHasCallExpression(node.property));
+    return (
+      isOrHasCallExpression(node.object) ||
+      (!node.computed && isOrHasCallExpression(node.property))
+    );
   } else {
     return false;
   }
-}
-
-
-export function isUserWhitespacable(node) {
-  return t.isUserWhitespacable(node);
 }
 
 export function needsWhitespace(node, parent, type) {
@@ -45,10 +63,10 @@ export function needsWhitespace(node, parent, type) {
     node = node.expression;
   }
 
-  let linesInfo = find(whitespace.nodes, node, parent);
+  let linesInfo = find(expandedWhitespaceNodes, node, parent);
 
   if (!linesInfo) {
-    let items = find(whitespace.list, node, parent);
+    const items = find(expandedWhitespaceList, node, parent);
     if (items) {
       for (let i = 0; i < items.length; i++) {
         linesInfo = needsWhitespace(items[i], node, type);
@@ -57,7 +75,11 @@ export function needsWhitespace(node, parent, type) {
     }
   }
 
-  return (linesInfo && linesInfo[type]) || 0;
+  if (typeof linesInfo === "object" && linesInfo !== null) {
+    return linesInfo[type] || 0;
+  }
+
+  return 0;
 }
 
 export function needsWhitespaceBefore(node, parent) {
@@ -75,5 +97,5 @@ export function needsParens(node, parent, printStack) {
     if (isOrHasCallExpression(node)) return true;
   }
 
-  return find(parens, node, parent, printStack);
+  return find(expandedParens, node, parent, printStack);
 }

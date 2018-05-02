@@ -1,9 +1,8 @@
-# babel-plugin-transform-object-set-prototype-of-to-assign
+# @babel/plugin-transform-object-set-prototype-of-to-assign
 
+> This plugin will transform all `Object.setPrototypeOf` calls to a method that will do a shallow defaults of all properties.
 
-The `object-set-prototype-of-to-assign` plugin will transform all `Object.setPrototypeOf` calls to a method that will do a shallow defaults of all properties.
-
-**NOTE:** There are some caveats when using this plugin, see the [`babel-plugin-transform-proto-to-assign` README](https://github.com/babel/babel/tree/master/packages/babel-plugin-transform-proto-to-assign) for more information..
+**NOTE:** There are some caveats when using this plugin, see the [`@babel/plugin-transform-proto-to-assign` README](https://github.com/babel/babel/tree/master/packages/babel-plugin-transform-proto-to-assign) for more information.
 
 ## Example
 
@@ -24,7 +23,7 @@ _defaults(bar, foo);
 ## Installation
 
 ```sh
-$ npm install babel-plugin-transform-object-set-prototype-of-to-assign
+npm install --save-dev @babel/plugin-transform-object-set-prototype-of-to-assign
 ```
 
 ## Usage
@@ -35,20 +34,20 @@ $ npm install babel-plugin-transform-object-set-prototype-of-to-assign
 
 ```json
 {
-  "plugins": ["transform-object-set-prototype-of-to-assign"]
+  "plugins": ["@babel/plugin-transform-object-set-prototype-of-to-assign"]
 }
 ```
 
 ### Via CLI
 
 ```sh
-$ babel --plugins transform-object-set-prototype-of-to-assign script.js
+babel --plugins @babel/plugin-transform-object-set-prototype-of-to-assign script.js
 ```
 
 ### Via Node API
 
 ```javascript
-require("babel-core").transform("code", {
-  plugins: ["transform-object-set-prototype-of-to-assign"]
+require("@babel/core").transform("code", {
+  plugins: ["@babel/plugin-transform-object-set-prototype-of-to-assign"]
 });
 ```

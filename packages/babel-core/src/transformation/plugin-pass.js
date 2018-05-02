@@ -1,40 +1,50 @@
-import type Plugin from "./plugin";
-import Store from "../store";
-import traverse from "babel-traverse";
-import File from "./file";
+// @flow
 
-export default class PluginPass extends Store {
-  constructor(file: File, plugin: Plugin, options: Object = {}) {
-    super();
-    this.plugin = plugin;
-    this.file   = file;
-    this.opts   = options;
-  }
+import type File from "./file/file";
 
-  plugin: Plugin;
+export default class PluginPass {
+  _map: Map<mixed, mixed> = new Map();
+  key: ?string;
   file: File;
   opts: Object;
+  filename: string | void;
 
-  transform() {
-    let file = this.file;
-    file.log.debug(`Start transformer ${this.key}`);
-    traverse(file.ast, this.plugin.visitor, file.scope, file);
-    file.log.debug(`Finish transformer ${this.key}`);
+  constructor(file: File, key: ?string, options: ?Object) {
+    this.key = key;
+    this.file = file;
+    this.opts = options || {};
+    this.filename =
+      typeof file.opts.filename === "string" ? file.opts.filename : undefined;
   }
 
-  addHelper(...args) {
-    return this.file.addHelper(...args);
+  set(key: mixed, val: mixed) {
+    this._map.set(key, val);
   }
 
-  addImport(...args) {
-    return this.file.addImport(...args);
+  get(key: mixed): any {
+    return this._map.get(key);
   }
 
-  getModuleName(...args) {
-    return this.file.getModuleName(...args);
+  addHelper(name: string) {
+    return this.file.addHelper(name);
   }
 
-  buildCodeFrameError(...args) {
-    return this.file.buildCodeFrameError(...args);
+  addImport() {
+    return this.file.addImport();
+  }
+
+  getModuleName(): ?string {
+    return this.file.getModuleName();
+  }
+
+  buildCodeFrameError(
+    node: ?{
+      loc?: { start: { line: number, column: number } },
+      _loc?: { start: { line: number, column: number } },
+    },
+    msg: string,
+    Error?: typeof Error,
+  ) {
+    return this.file.buildCodeFrameError(node, msg, Error);
   }
 }

@@ -1,31 +1,25 @@
-# babel-plugin-transform-member-expression-literals
+# @babel/plugin-transform-member-expression-literals
 
-Turn valid member expression property literals into plain identifiers
+> Ensure that reserved words are quoted in property accesses
 
 ## Example
 
 **In**
 
 ```javascript
-obj["foo"] = "isValid";
-
-obj.const = "isKeyword";
-obj["var"] = "isKeyword";
+foo.catch;
 ```
 
 **Out**
 
 ```javascript
-obj.foo = "isValid";
-
-obj["const"] = "isKeyword";
-obj["var"] = "isKeyword";
+foo["catch"];
 ```
 
 ## Installation
 
 ```sh
-$ npm install babel-plugin-transform-member-expression-literals
+npm install --save-dev @babel/plugin-transform-member-expression-literals
 ```
 
 ## Usage
@@ -36,20 +30,20 @@ $ npm install babel-plugin-transform-member-expression-literals
 
 ```json
 {
-  "plugins": ["transform-member-expression-literals"]
+  "plugins": ["@babel/plugin-transform-member-expression-literals"]
 }
 ```
 
 ### Via CLI
 
 ```sh
-$ babel --plugins transform-member-expression-literals script.js
+babel --plugins @babel/plugin-transform-member-expression-literals script.js
 ```
 
 ### Via Node API
 
 ```javascript
-require("babel-core").transform("code", {
-  plugins: ["transform-member-expression-literals"]
+require("@babel/core").transform("code", {
+  plugins: ["@babel/plugin-transform-member-expression-literals"]
 });
 ```

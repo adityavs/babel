@@ -1,5 +1,4 @@
-
- /**
+/**
  * This adds {fileName, lineNumber} annotations to React component definitions
  * and to jsx tag literals.
  *
@@ -13,41 +12,66 @@
  * var __jsxFileName = 'this/file.js';
  * <sometag __source={{fileName: __jsxFileName, lineNumber: 10}}/>
  */
-
+import { declare } from "@babel/helper-plugin-utils";
+import { types as t } from "@babel/core";
 
 const TRACE_ID = "__source";
 const FILE_NAME_VAR = "_jsxFileName";
 
-export default function ({ types: t }) {
+export default declare(api => {
+  api.assertVersion(7);
+
   function makeTrace(fileNameIdentifier, lineNumber) {
-    const fileLineLiteral = lineNumber != null ? t.numericLiteral(lineNumber) : t.nullLiteral();
-    const fileNameProperty = t.objectProperty(t.identifier("fileName"), fileNameIdentifier);
-    const lineNumberProperty = t.objectProperty(t.identifier("lineNumber"), fileLineLiteral);
+    const fileLineLiteral =
+      lineNumber != null ? t.numericLiteral(lineNumber) : t.nullLiteral();
+    const fileNameProperty = t.objectProperty(
+      t.identifier("fileName"),
+      fileNameIdentifier,
+    );
+    const lineNumberProperty = t.objectProperty(
+      t.identifier("lineNumber"),
+      fileLineLiteral,
+    );
     return t.objectExpression([fileNameProperty, lineNumberProperty]);
   }
 
-  let visitor = {
+  const visitor = {
     JSXOpeningElement(path, state) {
-      if (!state.fileNameIdentifier) {
-        const fileName = state.file.log.filename !== "unknown"
-          ? state.file.log.filename
-          : null;
+      const id = t.jsxIdentifier(TRACE_ID);
+      const location = path.container.openingElement.loc;
+      if (!location) {
+        // the element was generated and doesn't have location information
+        return;
+      }
 
-        const fileNameIdentifier = path.scope.generateUidIdentifier(FILE_NAME_VAR);
-        path.hub.file.scope.push({id: fileNameIdentifier, init: t.stringLiteral(fileName)});
+      const attributes = path.container.openingElement.attributes;
+      for (let i = 0; i < attributes.length; i++) {
+        const name = attributes[i].name;
+        if (name && name.name === TRACE_ID) {
+          // The __source attibute already exists
+          return;
+        }
+      }
+
+      if (!state.fileNameIdentifier) {
+        const fileName = state.filename || "";
+
+        const fileNameIdentifier = path.scope.generateUidIdentifier(
+          FILE_NAME_VAR,
+        );
+        path.hub.file.scope.push({
+          id: fileNameIdentifier,
+          init: t.stringLiteral(fileName),
+        });
         state.fileNameIdentifier = fileNameIdentifier;
       }
 
-      const id = t.jSXIdentifier(TRACE_ID);
-      const location = path.container.openingElement.loc; // undefined for generated elements
-      if (location) {
-        const trace = makeTrace(state.fileNameIdentifier, location.start.line);
-        path.container.openingElement.attributes.push(t.jSXAttribute(id, t.jSXExpressionContainer(trace)));
-      }
-    }
+      const trace = makeTrace(state.fileNameIdentifier, location.start.line);
+      attributes.push(t.jsxAttribute(id, t.jsxExpressionContainer(trace)));
+    },
   };
 
   return {
-    visitor
+    visitor,
   };
-}
+});
